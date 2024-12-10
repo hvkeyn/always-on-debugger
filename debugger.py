@@ -1,17 +1,17 @@
 import re
-import os
 from typing import Dict, Any, Optional
-from dotenv import load_dotenv, find_dotenv
-from typing import Callable, Dict, List, Optional
+from llm import initialize_llm, Conversation
+import logging
 
-import openai
-import anthropic
+# Set up a logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
 
-# Environment setup
-dotenv_path = find_dotenv()
-load_dotenv(dotenv_path)
-
-from llm import AnthropicLLM, Conversation
 
 class Debugger:
     DELIMITER = "#######"
@@ -34,7 +34,7 @@ class Debugger:
     {DELIMITER} Instruction:
     - Carefully read the user's input that includes error and optionally code snippet.
     - Generate a list of hypotheses to explain the error.
-    - Then suggest clear and concise steps users can follow to validate the error
+    - Then suggest clear and concise steps users can follow to validate the error.
 
     {DELIMITER}: Output
     <thinking>
@@ -44,14 +44,9 @@ class Debugger:
     {{Present your recommendation here. Be very specific, concise and actionable.}}
     </recommendation>
     """
-    # <reflection>
-    # {{Present your reflection on the recommendation here. If you think the recommendation is not enough, suggest more information you may need to solve the problem.}}
-    # </reflection>
 
     def __init__(self):
-        self.llm = AnthropicLLM()
-        self.llm.client.api_key = os.environ.get("ANTHROPIC_API_KEY")
-        #print(f"Anthropic API key: {self.llm.client.api_key}")
+        self.llm = initialize_llm()
 
     def generate_user_prompt_for_file_detection(self, command: str, error: str) -> str:
         return f"""
@@ -65,18 +60,13 @@ class Debugger:
         </error>
         """
 
-    def detect_file_path(self, command: str, error: str) -> Optional[str]:
-        user_prompt = self.generate_user_prompt_for_file_detection(command, error)
-        conversation = Conversation()
-        conversation.add_user_message(user_prompt)
-        messages = conversation.to_dict()
-
-        llm_response = self.llm.generate_conversation(self.FILE_DETECTION_SYSTEM_PROMPT, messages, model="small")
-        parsed_response = self.parse_response(llm_response)
-        filepath = parsed_response["filepath"]
-        if filepath == "NO_FILE":
-            return None
-        return filepath
+    def detect_file_path(self, command: str, error_message: str) -> Optional[str]:
+        logger.debug(f"Error message received: {error_message}")
+        match = re.search(r'File \"(.*?)\", line \d+', error_message)
+        if match:
+            return match.group(1)
+        logger.info("No file path detected in the error message.")
+        return None
 
     def generate_user_prompt_for_debug(self, command: str, error: str, code_snippet: Optional[str]) -> str:
         if code_snippet is None:
@@ -106,16 +96,19 @@ class Debugger:
             ===============
             """
 
-    def debug(self, command: str, error: str, code_snippet: Optional[str] = None) -> Dict[str, Any]:
-        user_prompt = self.generate_user_prompt_for_debug(command, error, code_snippet)
-        conversation = Conversation()
-        conversation.add_user_message(user_prompt)
-        messages = conversation.to_dict()
+    def debug(self, command: str, error_message: str, code_snippet: Optional[str]) -> Dict:
+        logger.info("Starting debugging process...")
+        messages = [
+            {"role": "user", "content": f"Command:\n{command}\n\nError:\n{error_message}"}
+        ]
+        if code_snippet:
+            messages.append({"role": "user", "content": f"Code snippet:\n{code_snippet}"})
 
-        llm_response = self.llm.generate_conversation_stream_print(self.DEBUG_SYSTEM_PROMPT, messages, model="latest_large")
-        parsed_response = self.parse_response(llm_response)
-        
-        return parsed_response
+        response = self.llm.generate_conversation(messages)
+        return {
+            "recommendation": response,
+            "error_analysis": "Error analysis completed.",
+        }
 
     @staticmethod
     def parse_response(llm_response: str) -> Dict[str, Any]:
@@ -124,19 +117,18 @@ class Debugger:
         """
         try:
             result = {}
-            
+
             patterns = {
                 'thinking': r'<thinking>(.*?)</thinking>',
                 'recommendation': r'<recommendation>(.*?)</recommendation>',
-                # 'reflection': r'<reflection>(.*?)</reflection>'
                 'filepath': r'<filepath>(.*?)</filepath>'
             }
-            
+
             for key, pattern in patterns.items():
                 match = re.search(pattern, llm_response, re.DOTALL)
-                result[key] = match.group(1).strip() if match else ""
-            
+                result[key] = match.group(1).strip() if match else None
+
             return result
         except Exception as e:
-            print(f"Error parsing response: {e}")
+            logger.error(f"Error parsing response: {e}")
             return {}
